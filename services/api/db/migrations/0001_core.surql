@@ -1,5 +1,6 @@
 -- 0001_core.surql — base is verbatim from SDAI-CHAT-003 Block 5 (spec is SSOT);
--- Sprint-01 sanctioned additions appended at the bottom (see PR + sprint report).
+-- Sprint-01 sanctioned changes: additions appended at the bottom, and the
+-- vector index is HNSW (spec said MTREE, which SurrealDB 3.x removed).
 
 DEFINE TABLE message SCHEMAFULL;
 DEFINE FIELD conversation ON message TYPE record<conversation>;
@@ -9,7 +10,7 @@ DEFINE FIELD text    ON message TYPE string ASSERT string::len($value) <= 262144
 DEFINE FIELD turn    ON message TYPE int READONLY;              -- server-stamped, monotonic per conversation
 DEFINE FIELD created_at ON message TYPE datetime VALUE time::now() READONLY;
 DEFINE FIELD embedding  ON message TYPE option<array<float>>;
-DEFINE INDEX msg_embedding ON message FIELDS embedding MTREE DIMENSION 768; -- vector index
+DEFINE INDEX msg_embedding ON message FIELDS embedding HNSW DIMENSION 768; -- vector index (embeddings are L2-normalized)
 -- immutability: no UPDATE permission is ever defined for message content
 
 DEFINE TABLE thread SCHEMAFULL;
