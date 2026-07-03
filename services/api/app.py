@@ -73,10 +73,15 @@ def create_app(store=None, intent_log=None, broker: EventBroker | None = None) -
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    @application.post("/v1/conversations/{conversation_id}/messages", status_code=201)
-    async def post_message(
-        conversation_id: str, payload: dict[str, Any], request: Request
-    ) -> Message | JSONResponse:
+    # response_model on the decorator (not a return annotation): the error
+    # paths return JSONResponse instances, which legally bypass the model —
+    # a `Message | JSONResponse` annotation is not a valid response field.
+    @application.post(
+        "/v1/conversations/{conversation_id}/messages",
+        status_code=201,
+        response_model=Message,
+    )
+    async def post_message(conversation_id: str, payload: dict[str, Any], request: Request):
         # 003 Principle 3: server-stamped fields are never accepted from clients.
         stamped = _SERVER_STAMPED_FIELDS & payload.keys()
         if stamped:
