@@ -1,0 +1,44 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start SurrealDB (in-memory)
+        run: |
+          docker run -d --name surrealdb -p 8000:8000 \
+            surrealdb/surrealdb:latest start --user root --pass root memory
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/8000) 2>/dev/null && break
+            sleep 1
+          done
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - name: Run test suite
+        working-directory: services/api
+        env:
+          SURREAL_URL: ws://127.0.0.1:8000/rpc
+          SURREAL_NS: senja
+          SURREAL_DB: ci
+          SURREAL_USER: root
+          SURREAL_PASS: root
+        run: uv run pytest -v
+      - name: Tripwire bench (informational — shared runners are noisy)
+        working-directory: services/api
+        env:
+          SURREAL_URL: ws://127.0.0.1:8000/rpc
+          SURREAL_NS: senja
+          SURREAL_DB: bench
+        run: |
+          if [ -f scripts/bench_snapshot.py ]; then
+            uv run python scripts/bench_snapshot.py
+          else
+            echo "bench not present yet — skipping"
+          fi
