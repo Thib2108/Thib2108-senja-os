@@ -9,6 +9,8 @@ identically against this adapter and the in-memory reference.
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,6 +21,17 @@ from models import MAX_MESSAGE_BYTES, Message, MessageTooLarge, Snapshot
 
 _TXN_RETRIES = 25
 _TXN_BACKOFF_S = 0.004  # linear: 4ms, 8ms, ... — counter contention clears fast
+
+_ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford base32
+
+
+def _new_ulid() -> str:
+    """Dependency-free ULID (ADR-04): 48-bit ms timestamp + 80 bits randomness,
+    26 chars Crockford base32 — lexicographically sortable by creation time."""
+    value = (int(time.time() * 1000) << 80) | int.from_bytes(os.urandom(10), "big")
+    return "".join(
+        _ULID_ALPHABET[(value >> (5 * shift)) & 31] for shift in range(25, -1, -1)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -67,14 +80,6 @@ def _record_to_message(conv_id: str, row: dict[str, Any]) -> Message:
     )
 
 
-def _extract_created_message(result: Any) -> dict[str, Any]:
-    """The append transaction RETURNs the created message; find its row."""
-    for row in reversed(_normalise_rows(result)):
-        if "turn" in row and "text" in row:
-            return row
-    raise RuntimeError(f"append returned no message row; raw result: {result!r}")
-
-
 def _is_txn_conflict(exc: Exception) -> bool:
     msg = str(exc).lower()
     return "retr" in msg or "conflict" in msg  # 'retried'/'retry'/'conflict'
@@ -91,11 +96,15 @@ class SurrealMessageStore:
     duplicate-free under concurrency, and crash-safe (a crash can never leave
     an allocated turn without its message).
 
+    The SDK returns None for transaction batches, so the adapter generates
+    the ULID id (ruling #5), commits the write-only transaction, and reads
+    the message back by known id with a single-statement SELECT.
+
     Optimistic-transaction conflicts (concurrent appends contending on the
     conversation's counter record) are retried with linear backoff. Safe:
     a conflicted transaction creates nothing, so retries never double-append.
 
-    Server stamps id (rand::ulid()), turn (counter), created_at (schema VALUE).
+    turn (counter) and created_at (schema VALUE) are server-stamped.
     No update or delete methods exist — append-only by construction (Principle 1).
     """
 
@@ -108,8 +117,10 @@ class SurrealMessageStore:
         if len(text.encode("utf-8")) > MAX_MESSAGE_BYTES:
             raise MessageTooLarge(f"message exceeds {MAX_MESSAGE_BYTES} bytes")
 
+        msg_id = _new_ulid()
         params = {
             "conv_id": conversation_id,
+            "msg_id": msg_id,
             "author": author,
             "lane": lane,
             "text": text,
@@ -117,19 +128,27 @@ class SurrealMessageStore:
         last_exc: Exception | None = None
         for attempt in range(_TXN_RETRIES):
             try:
-                result = await self._client.query(_sql.SQL_APPEND_MESSAGE, params)
+                await self._client.query(_sql.SQL_APPEND_MESSAGE, params)
             except Exception as exc:  # SDK raises on error responses
                 if _is_txn_conflict(exc):
                     last_exc = exc
                     await asyncio.sleep(_TXN_BACKOFF_S * (attempt + 1))
                     continue
                 raise
-            return _record_to_message(
-                conversation_id, _extract_created_message(result)
+            break
+        else:
+            raise RuntimeError(
+                f"append transaction still conflicting after {_TXN_RETRIES} retries"
+            ) from last_exc
+
+        rows = _normalise_rows(
+            await self._client.query(_sql.SQL_GET_MESSAGE, {"msg_id": msg_id})
+        )
+        if not rows:
+            raise RuntimeError(
+                f"append transaction committed but message {msg_id!r} not found"
             )
-        raise RuntimeError(
-            f"append transaction still conflicting after {_TXN_RETRIES} retries"
-        ) from last_exc
+        return _record_to_message(conversation_id, rows[0])
 
     async def snapshot(self, conversation_id: str) -> Snapshot:
         rows = await self._client.query(_sql.SQL_SNAPSHOT, {"conv_id": conversation_id})

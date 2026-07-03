@@ -6,6 +6,10 @@ surreal_impl.py imports them and never defines query strings.
 Targets SurrealDB 3.x (type::record, HNSW). See the 2.x-to-3.x migration
 guide for the renames if this ever runs against an older server.
 
+SDK quirk (verified in CI): query() returns None for any BEGIN/COMMIT batch,
+even with an explicit RETURN. Transactions here are therefore write-only;
+callers read results back with single-statement queries afterwards.
+
 Connect/migrate pattern:
     client = await connect()
     applied = await apply_migrations(client)
@@ -83,25 +87,28 @@ async def apply_migrations(client: AsyncSurreal) -> list[str]:
 # SurrealQL constants — imported by repos/surreal_impl.py
 # ---------------------------------------------------------------------------
 
-# Append is ONE transaction: ensure conversation, allocate the turn atomically
-# (conv_counter.n has DEFAULT 0 in 0001_core.surql), create the message.
-# A crash can never leave an allocated turn without its message (no gaps).
-# created_at is stamped by the schema's VALUE time::now() — never supplied here.
-# The explicit RETURN is required: the SDK surfaces a transaction's RETURN
-# value; without it, the last statement is COMMIT and query() yields None.
+# Append is ONE write-only transaction: ensure conversation, allocate the turn
+# atomically (conv_counter.n has DEFAULT 0 in 0001_core.surql), create the
+# message under the caller-supplied ULID id. A crash can never leave an
+# allocated turn without its message (no gaps). turn and created_at are
+# server-stamped; the caller reads the message back with SQL_GET_MESSAGE.
 SQL_APPEND_MESSAGE = """
 BEGIN TRANSACTION;
 UPSERT type::record('conversation', $conv_id);
 LET $c = (UPSERT type::record('conv_counter', $conv_id) SET n += 1 RETURN AFTER);
-LET $msg = (CREATE type::record('message', rand::ulid()) CONTENT {
+CREATE type::record('message', $msg_id) CONTENT {
     conversation: type::record('conversation', $conv_id),
     author: $author,
     lane: $lane,
     text: $text,
     turn: $c[0].n
-});
-RETURN $msg;
+};
 COMMIT TRANSACTION;
+"""
+
+# Single-statement read-back by known id (single statements return rows).
+SQL_GET_MESSAGE = """
+SELECT * FROM type::record('message', $msg_id);
 """
 
 SQL_SNAPSHOT = """
