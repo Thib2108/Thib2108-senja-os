@@ -18,7 +18,7 @@ dependencies = [
 docling = ["docling"]  # optional group — absence degrades to plain-text adapter, never crashes the spine
 
 [dependency-groups]
-dev = ["pytest", "pytest-asyncio", "hypothesis", "ruff", "mypy"]
+dev = ["pytest", "pytest-asyncio", "hypothesis", "ruff", "mypy", "httpx"]
 
 [tool.uv.sources]
 harness-kernel = { workspace = true }
