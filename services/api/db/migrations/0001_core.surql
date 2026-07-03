@@ -8,7 +8,7 @@ DEFINE FIELD text    ON message TYPE string ASSERT string::len($value) <= 262144
 DEFINE FIELD turn    ON message TYPE int READONLY;              -- server-stamped, monotonic per conversation
 DEFINE FIELD created_at ON message TYPE datetime VALUE time::now() READONLY;
 DEFINE FIELD embedding  ON message TYPE option<array<float>>;
-DEFINE INDEX msg_embedding ON message FIELDS embedding MTREE DIMENSION 768; -- vector index
+DEFINE INDEX msg_embedding ON message FIELDS embedding HNSW DIMENSION 768; -- vector index
 -- immutability: no UPDATE permission is ever defined for message content
 
 DEFINE TABLE thread SCHEMAFULL;
