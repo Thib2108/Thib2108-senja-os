@@ -19,7 +19,7 @@ from surrealdb import AsyncSurreal  # type: ignore[import-untyped]
 from db import surreal as _sql
 from models import MAX_MESSAGE_BYTES, Message, MessageTooLarge, Snapshot
 
-_TXN_RETRIES = 25
+_TXN_RETRIES = 50
 _TXN_BACKOFF_S = 0.004  # linear: 4ms, 8ms, ... — counter contention clears fast
 
 _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford base32
@@ -96,13 +96,16 @@ class SurrealMessageStore:
     duplicate-free under concurrency, and crash-safe (a crash can never leave
     an allocated turn without its message).
 
-    The SDK returns None for transaction batches, so the adapter generates
-    the ULID id (ruling #5), commits the write-only transaction, and reads
-    the message back by known id with a single-statement SELECT.
+    SDK reality (verified in CI): transaction batches always return None,
+    and a conflicted transaction aborts WITHOUT raising. The adapter
+    therefore generates the ULID id itself (ruling #5), commits the
+    write-only transaction, and reads the message back by known id — the
+    read-back doubles as the success check. Absent message = conflict
+    abort = retry the whole transaction.
 
-    Optimistic-transaction conflicts (concurrent appends contending on the
-    conversation's counter record) are retried with linear backoff. Safe:
-    a conflicted transaction creates nothing, so retries never double-append.
+    Safety: an aborted transaction creates nothing and rolls back the
+    counter (no turn gaps); a duplicate commit would fail loudly on the
+    existing ULID rather than double-append.
 
     turn (counter) and created_at (schema VALUE) are server-stamped.
     No update or delete methods exist — append-only by construction (Principle 1).
@@ -125,30 +128,27 @@ class SurrealMessageStore:
             "lane": lane,
             "text": text,
         }
-        last_exc: Exception | None = None
         for attempt in range(_TXN_RETRIES):
             try:
                 await self._client.query(_sql.SQL_APPEND_MESSAGE, params)
-            except Exception as exc:  # SDK raises on error responses
+            except Exception as exc:  # loud conflict — retry; anything else raises
                 if _is_txn_conflict(exc):
-                    last_exc = exc
                     await asyncio.sleep(_TXN_BACKOFF_S * (attempt + 1))
                     continue
                 raise
-            break
-        else:
-            raise RuntimeError(
-                f"append transaction still conflicting after {_TXN_RETRIES} retries"
-            ) from last_exc
 
-        rows = _normalise_rows(
-            await self._client.query(_sql.SQL_GET_MESSAGE, {"msg_id": msg_id})
-        )
-        if not rows:
-            raise RuntimeError(
-                f"append transaction committed but message {msg_id!r} not found"
+            # Read-back by known id is the success check: conflicted
+            # transactions abort silently (SDK returns None either way).
+            rows = _normalise_rows(
+                await self._client.query(_sql.SQL_GET_MESSAGE, {"msg_id": msg_id})
             )
-        return _record_to_message(conversation_id, rows[0])
+            if rows:
+                return _record_to_message(conversation_id, rows[0])
+            await asyncio.sleep(_TXN_BACKOFF_S * (attempt + 1))
+
+        raise RuntimeError(
+            f"append transaction still conflicting after {_TXN_RETRIES} retries"
+        )
 
     async def snapshot(self, conversation_id: str) -> Snapshot:
         rows = await self._client.query(_sql.SQL_SNAPSHOT, {"conv_id": conversation_id})
