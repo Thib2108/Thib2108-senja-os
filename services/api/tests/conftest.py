@@ -1,9 +1,13 @@
-"""Parity fixtures — transplanted pattern from the document-studio quarry.
+"""Parity fixtures — identical contract tests run over every implementation.
 
-Every contract test runs over all params. "surreal" skips until surreal_impl
-lands; the ADR-01 spike consists of removing that skip and making the identical
-suite pass (then the p95<100ms tripwire decides SurrealDB vs pgvector fallback).
+- memory: always runs; repos/memory_impl.py defines correct behavior.
+- surreal: runs when SURREAL_URL is set (CI sets it; locally requires a
+  running SurrealDB). Each test gets a fresh isolated database, so tests
+  never see each other's data.
 """
+
+import os
+import uuid
 
 import pytest
 
@@ -12,18 +16,42 @@ from repos.memory_impl import MemoryIntentLog, MemoryMessageStore
 IMPLS = ["memory", "surreal"]
 
 
-def _skip_if_pending(param: str) -> None:
-    if param == "surreal":
-        pytest.skip("surreal_impl pending — the ADR-01 spike flips this on")
+async def _surreal_client():
+    if not os.environ.get("SURREAL_URL"):
+        pytest.skip("SURREAL_URL not set — start SurrealDB to run surreal params")
+    from db.surreal import apply_migrations, connect
+
+    client = await connect()
+    # per-test isolation: fresh database, migrations applied from scratch
+    ns = os.environ.get("SURREAL_NS", "senja")
+    await client.use(ns, f"t_{uuid.uuid4().hex[:12]}")
+    await apply_migrations(client)
+    return client
 
 
 @pytest.fixture(params=IMPLS)
-def message_store(request):
-    _skip_if_pending(request.param)
-    return MemoryMessageStore()
+async def message_store(request):
+    if request.param == "memory":
+        yield MemoryMessageStore()
+        return
+    client = await _surreal_client()
+    from repos.surreal_impl import SurrealMessageStore
+
+    try:
+        yield SurrealMessageStore(client)
+    finally:
+        await client.close()
 
 
 @pytest.fixture(params=IMPLS)
-def intent_log(request):
-    _skip_if_pending(request.param)
-    return MemoryIntentLog()
+async def intent_log(request):
+    if request.param == "memory":
+        yield MemoryIntentLog()
+        return
+    client = await _surreal_client()
+    from repos.surreal_impl import SurrealIntentLog
+
+    try:
+        yield SurrealIntentLog(client)
+    finally:
+        await client.close()
