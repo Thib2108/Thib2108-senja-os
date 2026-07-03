@@ -23,3 +23,8 @@ dev = ["pytest", "pytest-asyncio", "hypothesis", "ruff", "mypy"]
 [tool.uv.sources]
 harness-kernel = { workspace = true }
 contracts = { workspace = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]
