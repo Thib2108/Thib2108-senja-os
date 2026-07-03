@@ -1,48 +1,57 @@
+"""Parity fixtures — identical contract tests run over every implementation.
+
+- memory: always runs; repos/memory_impl.py defines correct behavior.
+- surreal: runs when SURREAL_URL is set (CI sets it; locally requires a
+  running SurrealDB). Each test gets a fresh isolated database, so tests
+  never see each other's data.
+"""
+
 import os
 import uuid
+
 import pytest
-import pytest_asyncio
 
 from repos.memory_impl import MemoryIntentLog, MemoryMessageStore
-from repos.surreal_impl import SurrealIntentLog, SurrealMessageStore
-from db.surreal import connect, apply_migrations
 
 IMPLS = ["memory", "surreal"]
 
 
-def _skip_if_pending(param: str) -> None:
-    pass  # We handle 'surreal' specifically in the fixtures now
+async def _surreal_client():
+    if not os.environ.get("SURREAL_URL"):
+        pytest.skip("SURREAL_URL not set — start SurrealDB to run surreal params")
+    from db.surreal import apply_migrations, connect
+
+    client = await connect()
+    # per-test isolation: fresh database, migrations applied from scratch
+    ns = os.environ.get("SURREAL_NS", "senja")
+    await client.use(ns, f"t_{uuid.uuid4().hex[:12]}")
+    await apply_migrations(client)
+    return client
 
 
-@pytest_asyncio.fixture(params=IMPLS)
+@pytest.fixture(params=IMPLS)
 async def message_store(request):
     if request.param == "memory":
-        return MemoryMessageStore()
-    elif request.param == "surreal":
-        if "SURREAL_URL" not in os.environ:
-            pytest.skip("SURREAL_URL not set")
-        
-        # Test isolation: unique database name per test
-        test_db = f"test_{uuid.uuid4().hex[:12]}"
-        os.environ["SURREAL_DB"] = test_db
-        
-        client = await connect()
-        await apply_migrations(client)
-        return SurrealMessageStore(client)
+        yield MemoryMessageStore()
+        return
+    client = await _surreal_client()
+    from repos.surreal_impl import SurrealMessageStore
+
+    try:
+        yield SurrealMessageStore(client)
+    finally:
+        await client.close()
 
 
-@pytest_asyncio.fixture(params=IMPLS)
+@pytest.fixture(params=IMPLS)
 async def intent_log(request):
     if request.param == "memory":
-        return MemoryIntentLog()
-    elif request.param == "surreal":
-        if "SURREAL_URL" not in os.environ:
-            pytest.skip("SURREAL_URL not set")
-            
-        # Test isolation: unique database name per test
-        test_db = f"test_{uuid.uuid4().hex[:12]}"
-        os.environ["SURREAL_DB"] = test_db
-        
-        client = await connect()
-        await apply_migrations(client)
-        return SurrealIntentLog(client)
+        yield MemoryIntentLog()
+        return
+    client = await _surreal_client()
+    from repos.surreal_impl import SurrealIntentLog
+
+    try:
+        yield SurrealIntentLog(client)
+    finally:
+        await client.close()

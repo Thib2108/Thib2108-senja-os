@@ -1,13 +1,11 @@
 """SurrealDB engine/session — THE ONLY SurrealQL in the codebase (003 Principle 4).
 
-A static CI check (`test_no_surrealql_outside_db_dir`) keeps this honest.
-Local-first: single node, in-memory server, bound to 127.0.0.1.
+All SurrealQL string constants used by repos/surreal_impl.py are defined here;
+surreal_impl.py imports them and never defines query strings.
 
 Connect/migrate pattern:
     client = await connect()
     applied = await apply_migrations(client)
-
-All SurrealQL string constants used by repos/surreal_impl.py are defined here.
 """
 
 import os
@@ -18,38 +16,18 @@ from surrealdb import AsyncSurreal  # type: ignore[import-untyped]
 
 _MIGRATIONS_DIR = pathlib.Path(__file__).parent / "migrations"
 
-# ---------------------------------------------------------------------------
-# Migration DDL
-# ---------------------------------------------------------------------------
-
 _MIGRATION_INIT_SQL = """
 DEFINE TABLE IF NOT EXISTS migration SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS filename ON migration TYPE string;
 DEFINE INDEX IF NOT EXISTS migration_filename ON migration FIELDS filename UNIQUE;
 """
 
-# Schemaless tables used by the implementation that are not in the .surql files
-_EXTRA_DDL = """
-DEFINE TABLE IF NOT EXISTS conv_counter SCHEMALESS;
-DEFINE TABLE IF NOT EXISTS conversation SCHEMALESS;
-"""
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 
 async def connect() -> AsyncSurreal:
-    """Connect to SurrealDB, sign in, and select the namespace/database.
+    """Connect, sign in, and select namespace/database from env vars.
 
-    Reads configuration from environment variables with the defaults specified
-    in the Sprint-01 brief:
-
-        SURREAL_URL  = ws://127.0.0.1:8000/rpc
-        SURREAL_NS   = senja
-        SURREAL_DB   = dev
-        SURREAL_USER = root
-        SURREAL_PASS = root
+    Defaults (Sprint-01 brief): SURREAL_URL=ws://127.0.0.1:8000/rpc,
+    SURREAL_NS=senja, SURREAL_DB=dev, SURREAL_USER/PASS=root/root.
     """
     url = os.environ.get("SURREAL_URL", "ws://127.0.0.1:8000/rpc")
     ns = os.environ.get("SURREAL_NS", "senja")
@@ -67,42 +45,31 @@ async def connect() -> AsyncSurreal:
 async def apply_migrations(client: AsyncSurreal) -> list[str]:
     """Execute *.surql files in filename order, idempotently.
 
-    Maintains a `migration` table recording applied filenames.  Skips any
-    file that has already been applied.  Returns the list of filenames that
-    were applied in this call (empty list if nothing was new).
+    Maintains a `migration` table recording applied filenames; skips files
+    already applied. Returns the filenames applied in this call.
     """
-    # Ensure the migration tracking table exists.
     await client.query(_MIGRATION_INIT_SQL)
 
-    # Ensure runtime helper tables (schemaless) exist.
-    await client.query(_EXTRA_DDL)
-
     applied: list[str] = []
-
-    surql_files = sorted(_MIGRATIONS_DIR.glob("*.surql"))
-    for path in surql_files:
+    for path in sorted(_MIGRATIONS_DIR.glob("*.surql")):
         filename = path.name
-
-        # Check whether this migration was already applied.
         existing: Any = await client.query(
             "SELECT filename FROM migration WHERE filename = $fn LIMIT 1",
             {"fn": filename},
         )
-        # query() returns a list of records for a single statement.
         rows: list[Any] = existing if isinstance(existing, list) else []
         if rows:
             continue  # already applied
 
         sql = path.read_text(encoding="utf-8")
-        # The Python SDK crashes on empty queries, so skip if file is only comments
+        # The Python SDK rejects empty queries — skip comment-only files.
         has_statements = any(
-            line.strip() and not line.strip().startswith("--") 
+            line.strip() and not line.strip().startswith("--")
             for line in sql.splitlines()
         )
         if has_statements:
             await client.query(sql)
 
-        # Record the migration as applied.
         await client.create("migration", {"filename": filename})
         applied.append(filename)
 
@@ -110,62 +77,53 @@ async def apply_migrations(client: AsyncSurreal) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# SurrealQL constants — called by repos/surreal_impl.py
-# All query strings live here; surreal_impl.py imports them, never defines them.
+# SurrealQL constants — imported by repos/surreal_impl.py
 # ---------------------------------------------------------------------------
 
-# Ensure a conversation record exists (message.conversation is record<conversation>).
-SQL_ENSURE_CONV = """
-UPSERT type::record('conversation', $conv_id)
-SET id = type::record('conversation', $conv_id)
-RETURN NONE;
-"""
-
-SQL_ALLOC_TURN = """
-UPSERT type::record('conv_counter', $conv_id)
-SET n = IF n THEN n + 1 ELSE 1 END
-RETURN AFTER;
-"""
-
-SQL_CREATE_MESSAGE = """
-CREATE type::record('message', rand::ulid()) CONTENT {
-    conversation: type::record('conversation', $conv_id),
+# Append is ONE transaction: ensure conversation, allocate the turn atomically
+# (conv_counter.n has DEFAULT 0 in 0001_core.surql), create the message.
+# A crash can never leave an allocated turn without its message (no gaps).
+# created_at is stamped by the schema's VALUE time::now() — never supplied here.
+SQL_APPEND_MESSAGE = """
+BEGIN TRANSACTION;
+UPSERT type::thing('conversation', $conv_id);
+LET $c = (UPSERT type::thing('conv_counter', $conv_id) SET n += 1 RETURN AFTER);
+CREATE type::thing('message', rand::ulid()) CONTENT {
+    conversation: type::thing('conversation', $conv_id),
     author: $author,
     lane: $lane,
     text: $text,
-    turn: $turn,
-    created_at: time::now()
+    turn: $c[0].n
 };
+COMMIT TRANSACTION;
 """
 
-# Snapshot: all messages for a conversation, ordered by turn.
 SQL_SNAPSHOT = """
 SELECT * FROM message
-WHERE conversation = type::record('conversation', $conv_id)
+WHERE conversation = type::thing('conversation', $conv_id)
 ORDER BY turn ASC;
 """
 
-# Intent-log: insert a pending entry; no-op if (step, input_ref) key already exists.
+# Intent-log: deterministic record id = step|input_ref makes enqueue idempotent.
 SQL_ENQUEUE = """
 INSERT IGNORE INTO intent_log (id, step, input_ref, status) VALUES (
-    type::record('intent_log', string::concat($step, '|', $input_ref)),
+    type::thing('intent_log', string::concat($step, '|', $input_ref)),
     $step,
     $input_ref,
     'pending'
 );
 """
 
-# Claim: atomically transition pending → claimed; return the updated record if
-# successful so the caller knows whether they won the race.
+# Claim: single-statement conditional update — atomic; RETURN AFTER yields the
+# record only for the caller whose WHERE matched (the claim winner).
 SQL_CLAIM = """
-UPDATE type::record('intent_log', string::concat($step, '|', $input_ref))
+UPDATE type::thing('intent_log', string::concat($step, '|', $input_ref))
 SET status = 'claimed'
 WHERE status = 'pending'
 RETURN AFTER;
 """
 
-# Complete: mark the entry as done.
 SQL_COMPLETE = """
-UPDATE type::record('intent_log', string::concat($step, '|', $input_ref))
+UPDATE type::thing('intent_log', string::concat($step, '|', $input_ref))
 SET status = 'done';
 """
