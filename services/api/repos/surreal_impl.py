@@ -77,30 +77,37 @@ class SurrealMessageStore:
     async def append(
         self, conversation_id: str, text: str, lane: str, author: str
     ) -> Message:
-        """Append a message; raise MessageTooLarge if text > 262,144 bytes."""
         if len(text.encode("utf-8")) > MAX_MESSAGE_BYTES:
             raise MessageTooLarge(
-                f"message exceeds {MAX_MESSAGE_BYTES} bytes"
+                f"Payload size exceeds the {MAX_MESSAGE_BYTES} byte limit."
             )
 
-        # Ensure the conversation record exists (message field is a record<conversation>)
+        # 1. Ensure conversation exists (idempotent setup).
         await self._client.query(
             _sql.SQL_ENSURE_CONV, {"conv_id": conversation_id}
         )
 
-        # Atomically allocate a turn and create the message in one transaction.
+        # 2. Allocate gapless turn atomically.
+        counter_res = await self._client.query(
+            _sql.SQL_ALLOC_TURN, {"conv_id": conversation_id}
+        )
+        if isinstance(counter_res, list) and len(counter_res) > 0:
+            turn = counter_res[0].get("n", 1)
+        else:
+            turn = 1
+
+        # 3. Insert the message with the allocated turn.
         result = await self._client.query(
-            _sql.SQL_ATOMIC_APPEND,
+            _sql.SQL_CREATE_MESSAGE,
             {
                 "conv_id": conversation_id,
                 "author": author,
                 "lane": lane,
                 "text": text,
+                "turn": turn
             },
         )
 
-        # query() with multiple statements returns a list of per-statement results.
-        # The last SELECT returns the created message row.
         row = _extract_created_message(result)
         return _record_to_message(conversation_id, row)
 

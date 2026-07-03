@@ -121,37 +121,21 @@ SET id = type::record('conversation', $conv_id)
 RETURN NONE;
 """
 
-# Atomic turn allocation + message creation in one transaction.
-#
-# Strategy:
-#   1. UPSERT the counter record, incrementing n atomically.
-#   2. Read back the new n — this is the allocated turn.
-#   3. CREATE the message with that turn.
-#   4. RETURN the message so the caller can build a Message model.
-#
-# Using BEGIN/COMMIT ensures no concurrent writer can read the same n value.
-# The RETURN AFTER on the UPSERT is what makes n available inside the txn.
-SQL_ATOMIC_APPEND = """
-BEGIN TRANSACTION;
-LET $counter = (
-    UPSERT type::record('conv_counter', $conv_id)
-    SET n = IF (array::len(SELECT VALUE n FROM type::record('conv_counter', $conv_id)) > 0)
-              THEN (SELECT VALUE n FROM type::record('conv_counter', $conv_id))[0] + 1
-              ELSE 1 END
-    RETURN AFTER
-);
-LET $turn = $counter[0].n;
-LET $created = (
-    CREATE message CONTENT {
-        conversation: type::record('conversation', $conv_id),
-        author: $author,
-        lane: $lane,
-        text: $text,
-        turn: $turn
-    }
-);
-RETURN $created[0];
-COMMIT TRANSACTION;
+SQL_ALLOC_TURN = """
+UPSERT type::record('conv_counter', $conv_id)
+SET n = IF n THEN n + 1 ELSE 1 END
+RETURN AFTER;
+"""
+
+SQL_CREATE_MESSAGE = """
+CREATE type::record('message', rand::ulid()) CONTENT {
+    conversation: type::record('conversation', $conv_id),
+    author: $author,
+    lane: $lane,
+    text: $text,
+    turn: $turn,
+    created_at: time::now()
+};
 """
 
 # Snapshot: all messages for a conversation, ordered by turn.
@@ -174,15 +158,10 @@ INSERT IGNORE INTO intent_log (id, step, input_ref, status) VALUES (
 # Claim: atomically transition pending → claimed; return the updated record if
 # successful so the caller knows whether they won the race.
 SQL_CLAIM = """
-BEGIN TRANSACTION;
-LET $id = type::record('intent_log', string::concat($step, '|', $input_ref));
-LET $current = SELECT VALUE status FROM $id;
-LET $updated = IF (array::len($current) > 0 AND $current[0] = 'pending')
-    THEN (UPDATE $id SET status = 'claimed' RETURN AFTER)
-    ELSE []
-    END;
-RETURN $updated;
-COMMIT TRANSACTION;
+UPDATE type::record('intent_log', string::concat($step, '|', $input_ref))
+SET status = 'claimed'
+WHERE status = 'pending'
+RETURN AFTER;
 """
 
 # Complete: mark the entry as done.
