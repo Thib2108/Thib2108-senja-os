@@ -18,7 +18,7 @@ dependencies = [
 docling = ["docling"]  # optional group — absence degrades to plain-text adapter, never crashes the spine
 
 [dependency-groups]
-dev = ["pytest", "pytest-asyncio", "hypothesis", "ruff", "mypy", "httpx"]
+dev = ["pytest", "pytest-asyncio", "pytest-timeout", "hypothesis", "ruff", "mypy", "httpx"]
 
 [tool.uv.sources]
 harness-kernel = { workspace = true }
@@ -28,3 +28,4 @@ contracts = { workspace = true }
 asyncio_mode = "auto"
 pythonpath = ["."]
 testpaths = ["tests"]
+timeout = 120  # any hang becomes a loud failure, never a zombie CI job

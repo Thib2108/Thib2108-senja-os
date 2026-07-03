@@ -124,10 +124,16 @@ def create_app(store=None, intent_log=None, broker: EventBroker | None = None) -
         return await request.app.state.store.snapshot(conversation_id)
 
     @application.get("/v1/conversations/{conversation_id}/events")
-    async def get_events(conversation_id: str, request: Request):
+    async def get_events(
+        conversation_id: str, request: Request, until_turn: int | None = None
+    ):
         """SSE stream (ADR-02), resumable via Last-Event-ID = last seen turn.
         Replays the gap from the store, then goes live — no duplicates, no
-        gaps, guaranteed by monotonic turns."""
+        gaps, guaranteed by monotonic turns.
+
+        `until_turn` (optional): bounded catch-up read — the server closes
+        the stream once the given turn has been sent. Also what keeps the
+        stream deterministic under buffering test transports."""
         store = request.app.state.store
         broker: EventBroker = request.app.state.broker
         raw = request.headers.get("last-event-id")
@@ -151,6 +157,10 @@ def create_app(store=None, intent_log=None, broker: EventBroker | None = None) -
                             "data": m.model_dump_json(),
                         }
                         sent = m.turn
+                        if until_turn is not None and sent >= until_turn:
+                            return
+                if until_turn is not None and sent >= until_turn:
+                    return
                 while True:
                     m = await queue.get()
                     if m.turn > sent:
@@ -160,6 +170,8 @@ def create_app(store=None, intent_log=None, broker: EventBroker | None = None) -
                             "data": m.model_dump_json(),
                         }
                         sent = m.turn
+                        if until_turn is not None and sent >= until_turn:
+                            return
             finally:
                 broker.unsubscribe(conversation_id, queue)
 

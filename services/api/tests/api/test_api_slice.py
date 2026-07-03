@@ -3,6 +3,12 @@
 Runs over every store implementation via the parity `message_store` fixture
 (memory always; surreal when SURREAL_URL is set) — the API behaves
 identically regardless of the adapter behind the port.
+
+NOTE on SSE tests: httpx's ASGITransport BUFFERS — it runs the ASGI app to
+completion before returning the response, so an unbounded SSE stream hangs
+the request forever (this hung CI once; see the Sprint 02 log). All
+HTTP-level SSE tests therefore pass `until_turn=N` so the server closes the
+stream deterministically after the target turn.
 """
 
 import asyncio
@@ -25,7 +31,8 @@ async def client(message_store):
 
 
 async def _read_events(response, count):
-    """Parse SSE lines into events; returns once `count` data events seen."""
+    """Parse SSE lines into events; returns once `count` data events seen
+    or the stream ends."""
     events, current = [], {}
     async for line in response.aiter_lines():
         line = line.strip()
@@ -94,7 +101,9 @@ async def test_sse_resume_replays_without_dupes_or_gaps(client):
         await client.post("/v1/conversations/conv-1/messages", json={"text": f"msg {i}"})
 
     async with client.stream(
-        "GET", "/v1/conversations/conv-1/events", headers={"Last-Event-ID": "1"}
+        "GET",
+        "/v1/conversations/conv-1/events?until_turn=3",
+        headers={"Last-Event-ID": "1"},
     ) as r:
         events = await asyncio.wait_for(_read_events(r, 2), timeout=10)
 
@@ -103,13 +112,26 @@ async def test_sse_resume_replays_without_dupes_or_gaps(client):
 
 
 async def test_sse_live_fanout(client):
-    """A message posted while a stream is open arrives as a live event."""
-    async with client.stream("GET", "/v1/conversations/conv-live/events") as r:
-        post = asyncio.create_task(
-            client.post("/v1/conversations/conv-live/messages", json={"text": "live"})
-        )
-        events = await asyncio.wait_for(_read_events(r, 1), timeout=10)
-        await post
+    """A message posted while a stream is open arrives as an event.
+
+    The reader runs as a task (ASGITransport buffers — the request only
+    returns when the app finishes, i.e. when until_turn is reached). The
+    short sleep gives the stream time to subscribe before the post; if the
+    post wins the race anyway, the replay path delivers the same event —
+    deterministic either way, which is the point of log-as-event-source."""
+
+    async def read_stream():
+        async with client.stream(
+            "GET", "/v1/conversations/conv-live/events?until_turn=1"
+        ) as r:
+            return await _read_events(r, 1)
+
+    reader = asyncio.create_task(read_stream())
+    await asyncio.sleep(0.1)
+    await client.post("/v1/conversations/conv-live/messages", json={"text": "live"})
+    events = await asyncio.wait_for(reader, timeout=10)
+
+    assert len(events) == 1
     assert json.loads(events[0]["data"])["text"] == "live"
     assert events[0]["event"] == "message.appended"
 
