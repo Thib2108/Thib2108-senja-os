@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+
+# Node
+node_modules/
+.pnpm-store/
+
+# Env & secrets
+.env
+.env.*
+
+# Data
+*.db
+*.surql.bak
+data/
+
+# OS / editor
+.DS_Store
+Thumbs.db

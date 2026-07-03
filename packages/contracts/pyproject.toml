@@ -1,0 +1,10 @@
+[project]
+name = "contracts"
+version = "0.1.0"
+description = "Typed I/O contracts; enums GENERATED from the taxonomies and the Edge Registry"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

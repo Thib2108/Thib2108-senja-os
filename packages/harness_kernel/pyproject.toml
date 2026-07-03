@@ -1,0 +1,10 @@
+[project]
+name = "harness-kernel"
+version = "0.1.0"
+description = "Shared harness kernel: bounded loops, grounding gates, ontology binding, decision log (SDAI-CHAT-001; shared per 004 ADR-04)"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

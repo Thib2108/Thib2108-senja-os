@@ -1,0 +1,9 @@
+-- 0003_registry_edges.surql — storage-name alignment with the Edge Registry (003 Block 5 rule)
+--
+-- The CONVERGES | INTERSECTS | DEPENDS_ON strings in 0001_core.surql are the
+-- model-facing enum surface; the write gate lowercases them to canonical
+-- converges | intersects | depends_on. This migration aligns storage names with
+-- the registry (v0.2) and defines the remaining relation tables.
+--
+-- TODO(gen): emit from packages/contracts/src/contracts/edges.py via a
+-- scripts/gen_registry step so hand-written relation names cannot reach the schema.

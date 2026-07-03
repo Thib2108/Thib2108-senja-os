@@ -1,0 +1,25 @@
+[project]
+name = "senja-api"
+version = "0.1.0"
+description = "Store of record, API seam, SSE fan-out, knowledge pipelines (SDAI-CHAT-003/004)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "sse-starlette",
+    "pydantic>=2",
+    "pydantic-ai",
+    "python-ulid",
+    "surrealdb",
+    "harness-kernel",
+    "contracts",
+]
+
+[project.optional-dependencies]
+docling = ["docling"]  # optional group — absence degrades to plain-text adapter, never crashes the spine
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "hypothesis", "ruff", "mypy"]
+
+[tool.uv.sources]
+harness-kernel = { workspace = true }
+contracts = { workspace = true }
