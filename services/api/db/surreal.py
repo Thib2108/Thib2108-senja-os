@@ -87,17 +87,20 @@ async def apply_migrations(client: AsyncSurreal) -> list[str]:
 # (conv_counter.n has DEFAULT 0 in 0001_core.surql), create the message.
 # A crash can never leave an allocated turn without its message (no gaps).
 # created_at is stamped by the schema's VALUE time::now() — never supplied here.
+# The explicit RETURN is required: the SDK surfaces a transaction's RETURN
+# value; without it, the last statement is COMMIT and query() yields None.
 SQL_APPEND_MESSAGE = """
 BEGIN TRANSACTION;
 UPSERT type::record('conversation', $conv_id);
 LET $c = (UPSERT type::record('conv_counter', $conv_id) SET n += 1 RETURN AFTER);
-CREATE type::record('message', rand::ulid()) CONTENT {
+LET $msg = (CREATE type::record('message', rand::ulid()) CONTENT {
     conversation: type::record('conversation', $conv_id),
     author: $author,
     lane: $lane,
     text: $text,
     turn: $c[0].n
-};
+});
+RETURN $msg;
 COMMIT TRANSACTION;
 """
 

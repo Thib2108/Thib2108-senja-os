@@ -8,6 +8,7 @@ identically against this adapter and the in-memory reference.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,6 +16,9 @@ from surrealdb import AsyncSurreal  # type: ignore[import-untyped]
 
 from db import surreal as _sql
 from models import MAX_MESSAGE_BYTES, Message, MessageTooLarge, Snapshot
+
+_TXN_RETRIES = 25
+_TXN_BACKOFF_S = 0.004  # linear: 4ms, 8ms, ... — counter contention clears fast
 
 
 # ---------------------------------------------------------------------------
@@ -64,12 +68,16 @@ def _record_to_message(conv_id: str, row: dict[str, Any]) -> Message:
 
 
 def _extract_created_message(result: Any) -> dict[str, Any]:
-    """The append transaction returns several statement results; the created
-    message is the last row that has a `turn` field."""
+    """The append transaction RETURNs the created message; find its row."""
     for row in reversed(_normalise_rows(result)):
         if "turn" in row and "text" in row:
             return row
     raise RuntimeError(f"append returned no message row; raw result: {result!r}")
+
+
+def _is_txn_conflict(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "retr" in msg or "conflict" in msg  # 'retried'/'retry'/'conflict'
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +90,10 @@ class SurrealMessageStore:
     in ONE database transaction (SQL_APPEND_MESSAGE) — monotonic, gapless,
     duplicate-free under concurrency, and crash-safe (a crash can never leave
     an allocated turn without its message).
+
+    Optimistic-transaction conflicts (concurrent appends contending on the
+    conversation's counter record) are retried with linear backoff. Safe:
+    a conflicted transaction creates nothing, so retries never double-append.
 
     Server stamps id (rand::ulid()), turn (counter), created_at (schema VALUE).
     No update or delete methods exist — append-only by construction (Principle 1).
@@ -96,22 +108,36 @@ class SurrealMessageStore:
         if len(text.encode("utf-8")) > MAX_MESSAGE_BYTES:
             raise MessageTooLarge(f"message exceeds {MAX_MESSAGE_BYTES} bytes")
 
-        result = await self._client.query(
-            _sql.SQL_APPEND_MESSAGE,
-            {
-                "conv_id": conversation_id,
-                "author": author,
-                "lane": lane,
-                "text": text,
-            },
-        )
-        return _record_to_message(conversation_id, _extract_created_message(result))
+        params = {
+            "conv_id": conversation_id,
+            "author": author,
+            "lane": lane,
+            "text": text,
+        }
+        last_exc: Exception | None = None
+        for attempt in range(_TXN_RETRIES):
+            try:
+                result = await self._client.query(_sql.SQL_APPEND_MESSAGE, params)
+            except Exception as exc:  # SDK raises on error responses
+                if _is_txn_conflict(exc):
+                    last_exc = exc
+                    await asyncio.sleep(_TXN_BACKOFF_S * (attempt + 1))
+                    continue
+                raise
+            return _record_to_message(
+                conversation_id, _extract_created_message(result)
+            )
+        raise RuntimeError(
+            f"append transaction still conflicting after {_TXN_RETRIES} retries"
+        ) from last_exc
 
     async def snapshot(self, conversation_id: str) -> Snapshot:
         rows = await self._client.query(_sql.SQL_SNAPSHOT, {"conv_id": conversation_id})
         messages = [_record_to_message(conversation_id, r) for r in _normalise_rows(rows)]
         messages.sort(key=lambda m: m.turn)  # belt-and-braces over ORDER BY
         return Snapshot(conversation_id=conversation_id, messages=messages)
+
+    # No update / delete methods — append-only by construction (003 Principle 1).
 
 
 # ---------------------------------------------------------------------------
