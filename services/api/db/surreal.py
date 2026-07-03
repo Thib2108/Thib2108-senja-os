@@ -3,6 +3,9 @@
 All SurrealQL string constants used by repos/surreal_impl.py are defined here;
 surreal_impl.py imports them and never defines query strings.
 
+Targets SurrealDB 3.x (type::record, HNSW). See the 2.x-to-3.x migration
+guide for the renames if this ever runs against an older server.
+
 Connect/migrate pattern:
     client = await connect()
     applied = await apply_migrations(client)
@@ -86,10 +89,10 @@ async def apply_migrations(client: AsyncSurreal) -> list[str]:
 # created_at is stamped by the schema's VALUE time::now() — never supplied here.
 SQL_APPEND_MESSAGE = """
 BEGIN TRANSACTION;
-UPSERT type::thing('conversation', $conv_id);
-LET $c = (UPSERT type::thing('conv_counter', $conv_id) SET n += 1 RETURN AFTER);
-CREATE type::thing('message', rand::ulid()) CONTENT {
-    conversation: type::thing('conversation', $conv_id),
+UPSERT type::record('conversation', $conv_id);
+LET $c = (UPSERT type::record('conv_counter', $conv_id) SET n += 1 RETURN AFTER);
+CREATE type::record('message', rand::ulid()) CONTENT {
+    conversation: type::record('conversation', $conv_id),
     author: $author,
     lane: $lane,
     text: $text,
@@ -100,14 +103,14 @@ COMMIT TRANSACTION;
 
 SQL_SNAPSHOT = """
 SELECT * FROM message
-WHERE conversation = type::thing('conversation', $conv_id)
+WHERE conversation = type::record('conversation', $conv_id)
 ORDER BY turn ASC;
 """
 
 # Intent-log: deterministic record id = step|input_ref makes enqueue idempotent.
 SQL_ENQUEUE = """
 INSERT IGNORE INTO intent_log (id, step, input_ref, status) VALUES (
-    type::thing('intent_log', string::concat($step, '|', $input_ref)),
+    type::record('intent_log', string::concat($step, '|', $input_ref)),
     $step,
     $input_ref,
     'pending'
@@ -117,13 +120,13 @@ INSERT IGNORE INTO intent_log (id, step, input_ref, status) VALUES (
 # Claim: single-statement conditional update — atomic; RETURN AFTER yields the
 # record only for the caller whose WHERE matched (the claim winner).
 SQL_CLAIM = """
-UPDATE type::thing('intent_log', string::concat($step, '|', $input_ref))
+UPDATE type::record('intent_log', string::concat($step, '|', $input_ref))
 SET status = 'claimed'
 WHERE status = 'pending'
 RETURN AFTER;
 """
 
 SQL_COMPLETE = """
-UPDATE type::thing('intent_log', string::concat($step, '|', $input_ref))
+UPDATE type::record('intent_log', string::concat($step, '|', $input_ref))
 SET status = 'done';
 """
